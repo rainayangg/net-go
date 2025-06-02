@@ -17,6 +17,7 @@ type KomaConn struct {
 	fd      C.int
 	file    *os.File
 	rawConn syscall.RawConn
+	from unix.Sockaddr
 }
 
 func NewKomaConn(fd C.int) (*KomaConn, error) {
@@ -37,7 +38,7 @@ func (k *KomaConn) Read(b []byte) (int, error) {
 	var n int
 	var err error
 	readErr := k.rawConn.Read(func(fd uintptr) bool {
-		n, _, _, _, err = unix.Recvmsg(int(fd), b, nil, 0)
+		n, _, _, k.from, err = unix.Recvmsg(int(fd), b, nil, 0)
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK { // --> I think returning false is necesary. 
 								// If we dont get data, we say the poller to again wait until the fd is available. This matches grpc expected behavior
 			return false
@@ -56,7 +57,7 @@ func (k *KomaConn) Write(b []byte) (int, error) {
 	var err error
 
 	writeErr := k.rawConn.Write(func(fd uintptr) bool {
-		err = unix.Sendmsg(int(fd), b, nil, nil, 0)
+		err = unix.Sendmsg(int(fd), b, nil, k.from, 0)
 		if err == unix.EAGAIN {
 			return false
 		}
