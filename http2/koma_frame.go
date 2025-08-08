@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"strings"
 
 	"golang.org/x/net/http/httpguts"
@@ -29,9 +30,9 @@ func readFrameHeaderDgram(b []byte) FrameHeader {
 
 // A Framer reads and writes Frames.
 type KomaFramer struct {
-	komaSocket KomaConn
-	lastFrame Frame
-	errDetail error
+	komaSocket net.Conn
+	lastFrame  Frame
+	errDetail  error
 
 	// countError is a non-nil func that's called on a frame parse
 	// error with some unique error path token. It's initialized
@@ -176,11 +177,10 @@ func (fr *KomaFramer) SetReuseFrames() {
 	fr.frameCache = &frameCache{}
 }
 
-
 // NewFramer returns a Framer that writes frames to w and reads them from r.
-func NewKomaFramer(komaSocket KomaConn) *KomaFramer {
+func NewKomaFramer(conn net.Conn) *KomaFramer {
 	fr := &KomaFramer{
-		komaSocket: 	   komaSocket,
+		komaSocket:        conn,
 		countError:        func(string) {},
 		logReads:          logFrameReads,
 		logWrites:         logFrameWrites,
@@ -221,8 +221,6 @@ func (fr *KomaFramer) ErrorDetail() error {
 	return fr.errDetail
 }
 
-
-
 // ReadFrame reads a single frame. The returned Frame is only valid
 // until the next call to ReadFrame.
 //
@@ -233,8 +231,8 @@ func (fr *KomaFramer) ErrorDetail() error {
 //
 // If ReadFrame returns an error and a non-nil Frame, the Frame's StreamID
 // indicates the stream responsible for the error.
-func (fr *KomaFramer) ReadFrame() (Frame, error) {  // --> we dont get the preface here, one must check the implementation
-												//https://github.com/grpc/grpc-go/blob/master/internal/transport/http2_server.go#L305C43-L305C45
+func (fr *KomaFramer) ReadFrame() (Frame, error) { // --> we dont get the preface here, one must check the implementation
+	// https://github.com/grpc/grpc-go/blob/master/internal/transport/http2_server.go#L305C43-L305C45
 	fr.errDetail = nil
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
@@ -252,7 +250,7 @@ func (fr *KomaFramer) ReadFrame() (Frame, error) {  // --> we dont get the prefa
 		return nil, ErrFrameTooLarge
 	}
 
-	if n != int(9 + fh.Length) {
+	if n != int(9+fh.Length) {
 		return nil, fmt.Errorf("http2: the koma datagram isn't a single http2 frame: mismatch header length %d - koma read %d", 9+fh.Length, n)
 	}
 
@@ -323,7 +321,6 @@ func (fr *KomaFramer) checkFrameOrder(f Frame) error {
 	return nil
 }
 
-
 // WriteData writes a DATA frame.
 //
 // It will perform exactly one Write to the underlying Writer.
@@ -384,7 +381,6 @@ func (f *KomaFramer) startWriteDataPadded(streamID uint32, endStream bool, data,
 	return nil
 }
 
-
 // WriteSettings writes a SETTINGS frame with zero or more settings
 // specified and the ACK bit not set.
 //
@@ -408,7 +404,6 @@ func (f *KomaFramer) WriteSettingsAck() error {
 	return f.endWrite()
 }
 
-
 func (f *KomaFramer) WritePing(ack bool, data [8]byte) error {
 	var flags Flags
 	if ack {
@@ -419,7 +414,6 @@ func (f *KomaFramer) WritePing(ack bool, data [8]byte) error {
 	return f.endWrite()
 }
 
-
 func (f *KomaFramer) WriteGoAway(maxStreamID uint32, code ErrCode, debugData []byte) error {
 	f.startWrite(FrameGoAway, 0, 0)
 	f.writeUint32(maxStreamID & (1<<31 - 1))
@@ -427,7 +421,6 @@ func (f *KomaFramer) WriteGoAway(maxStreamID uint32, code ErrCode, debugData []b
 	f.writeBytes(debugData)
 	return f.endWrite()
 }
-
 
 // WriteWindowUpdate writes a WINDOW_UPDATE frame.
 // The increment value must be between 1 and 2,147,483,647, inclusive.
@@ -442,7 +435,6 @@ func (f *KomaFramer) WriteWindowUpdate(streamID, incr uint32) error {
 	f.writeUint32(incr)
 	return f.endWrite()
 }
-
 
 // WriteHeaders writes a single HEADERS frame.
 //
@@ -489,7 +481,6 @@ func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	return f.endWrite()
 }
 
-
 // WritePriority writes a PRIORITY frame.
 //
 // It will perform exactly one Write to the underlying Writer.
@@ -511,7 +502,6 @@ func (f *KomaFramer) WritePriority(streamID uint32, p PriorityParam) error {
 	return f.endWrite()
 }
 
-
 // WriteRSTStream writes a RST_STREAM frame.
 //
 // It will perform exactly one Write to the underlying Writer.
@@ -524,7 +514,6 @@ func (f *KomaFramer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	f.writeUint32(uint32(code))
 	return f.endWrite()
 }
-
 
 // WriteContinuation writes a CONTINUATION frame.
 //
@@ -601,7 +590,7 @@ func (fr *KomaFramer) readMetaFrame(hf *HeadersFrame) (Frame, error) {
 	mh := &MetaHeadersFrame{
 		HeadersFrame: hf,
 	}
-	var remainSize = fr.maxHeaderListSize()
+	remainSize := fr.maxHeaderListSize()
 	var sawRegular bool
 
 	var invalid error // pseudo header field errors
