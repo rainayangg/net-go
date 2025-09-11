@@ -221,8 +221,82 @@ func (fr *KomaFramer) ErrorDetail() error {
 	return fr.errDetail
 }
 
+// ReadFrames reads all the frames of a single HTTP2 stream in one go.
+// The returned Frames is only valid until the next call to ReadFrame.
+//
+// If ReadFrame returns an error and a non-nil Frame, the Frame's StreamID
+// indicates the stream responsible for the error.
+func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the preface here, one must check the implementation
+	// https://github.com/grpc/grpc-go/blob/master/internal/transport/http2_server.go#L305C43-L305C45
+	fr.errDetail = nil
+	// TODO: should I do anything to the lastFrame? to understand it better
+	if fr.lastFrame != nil {
+		fr.lastFrame.invalidate()
+	}
+
+	// Reads the whole stream
+	n, err := fr.komaSocket.Read(fr.rbuf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the whole stream into a slice consisting of frames
+	buf := fr.rbuf[:n]
+	var frames []Frame
+	for len(buf) > 0 {
+		if len(buf) < 9 {
+			return nil, fmt.Errorf("http2: truncated frame header")
+		}
+
+		// read header
+		fh := readFrameHeaderDgram(buf)
+		if fh.Length > fr.maxReadSize {
+			if fh == invalidHTTP1LookingFrameHeader() {
+				return nil, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", err)
+			}
+			return nil, ErrFrameTooLarge
+		}
+
+		frameLen := 9 + int(fh.Length)
+		if len(buf) < frameLen {
+			return nil, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
+		}
+
+		// a full frame in the buffer, parse it
+		f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, buf[9:frameLen])
+		if err != nil {
+			if ce, ok := err.(connError); ok {
+				return nil, fr.connError(ce.Code, ce.Reason)
+			}
+			return nil, err
+		}
+		if err := fr.checkFrameOrder(f); err != nil {
+			return nil, err
+		}
+		if fr.logReads {
+			fr.debugReadLoggerf("http2: Framer %p: read %v", fr, summarizeFrame(f))
+		}
+
+		// Header frame, the first frame of a stream, this should happen for the first iteration of the current for loop
+		if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
+			meta, err := fr.readMetaFrame(f.(*HeadersFrame))
+			if err != nil {
+				return nil, err
+			}
+			frames = append(frames, meta)
+		} else {
+			frames = append(frames, f)
+		}
+
+		buf = buf[frameLen:]
+	}
+	return frames, nil
+}
+
 // ReadFrame reads a single frame. The returned Frame is only valid
 // until the next call to ReadFrame.
+// Note: it is only a placebo here for now.
+// TODO: to be deleted later.
 //
 // If the frame is larger than previously set with SetMaxReadFrameSize, the
 // returned error is ErrFrameTooLarge. Other errors may be of type
