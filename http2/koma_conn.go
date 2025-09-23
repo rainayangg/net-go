@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,14 +17,16 @@ import (
 )
 
 type KomaConn struct {
-	fd      C.int
+	fd      int
 	file    *os.File
 	rawConn syscall.RawConn
 	from    unix.Sockaddr
+	m       *sync.Map
 }
 
 type KomaAddr struct {
-	fd C.int
+	fd   int
+	from unix.Sockaddr
 }
 
 func (a *KomaAddr) Network() string {
@@ -31,10 +34,18 @@ func (a *KomaAddr) Network() string {
 }
 
 func (a *KomaAddr) String() string {
-	return fmt.Sprintf("komaFD: %d", a.fd)
+	switch v := a.from.(type) {
+	case *unix.SockaddrInet4:
+		ip := net.IP(v.Addr[:])
+		return string(fmt.Sprintf("%s:%d", ip.String(), v.Port))
+	case *unix.SockaddrInet6:
+		return "Not supported!"
+	default:
+		return ""
+	}
 }
 
-func NewKomaConn(fd C.int) (*KomaConn, error) {
+func NewKomaConn(fd int, m *sync.Map) (*KomaConn, error) {
 	file := os.NewFile(uintptr(fd), "koma-socket")
 	rawConn, err := file.SyscallConn()
 	if err != nil || rawConn == nil {
@@ -45,7 +56,16 @@ func NewKomaConn(fd C.int) (*KomaConn, error) {
 		fd:      fd,
 		file:    file,
 		rawConn: rawConn,
+		m:       m,
 	}, nil
+}
+
+func (k *KomaConn) GetFd() int {
+	return k.fd
+}
+
+func (k *KomaConn) GetMap() *sync.Map {
+	return k.m
 }
 
 func (k *KomaConn) Read(b []byte) (int, error) {
@@ -106,14 +126,14 @@ func (k *KomaConn) LocalAddr() net.Addr {
 	return &KomaAddr{fd: k.fd}
 }
 
-// RemoteAddr returns the remote network address.
+// RemoteAddr returns the remote network address stored in from.
 // The Addr returned is shared by all invocations of RemoteAddr, so
 // do not modify it.
 func (k *KomaConn) RemoteAddr() net.Addr {
 	if !k.ok() {
 		return nil
 	}
-	return &KomaAddr{fd: 0}
+	return &KomaAddr{from: k.from}
 }
 
 // SetDeadline is a stub. Not implemented yet.

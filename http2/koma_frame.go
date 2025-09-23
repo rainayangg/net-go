@@ -30,7 +30,7 @@ func readFrameHeaderDgram(b []byte) FrameHeader {
 
 // A Framer reads and writes Frames.
 type KomaFramer struct {
-	komaSocket net.Conn
+	KomaSocket net.Conn
 	lastFrame  Frame
 	errDetail  error
 
@@ -135,7 +135,7 @@ func (f *KomaFramer) endWrite() error {
 		f.logWrite()
 	}
 
-	n, err := f.komaSocket.Write(f.wbuf)
+	n, err := f.KomaSocket.Write(f.wbuf)
 	if err == nil && n != len(f.wbuf) {
 		err = io.ErrShortWrite
 	}
@@ -180,7 +180,7 @@ func (fr *KomaFramer) SetReuseFrames() {
 // NewFramer returns a Framer that writes frames to w and reads them from r.
 func NewKomaFramer(conn net.Conn) *KomaFramer {
 	fr := &KomaFramer{
-		komaSocket:        conn,
+		KomaSocket:        conn,
 		countError:        func(string) {},
 		logReads:          logFrameReads,
 		logWrites:         logFrameWrites,
@@ -235,7 +235,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	}
 
 	// Reads the whole stream
-	n, err := fr.komaSocket.Read(fr.rbuf)
+	n, err := fr.KomaSocket.Read(fr.rbuf)
 	if err != nil {
 		return nil, err
 	}
@@ -311,11 +311,12 @@ func (fr *KomaFramer) ReadFrame() (Frame, error) { // --> we dont get the prefac
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
-	n, err := fr.komaSocket.Read(fr.rbuf)
+	fmt.Printf("Koma socket starts reading!\n")
+	n, err := fr.KomaSocket.Read(fr.rbuf)
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Printf("Koma socket finishes reading!\n")
 	fh := readFrameHeaderDgram(fr.rbuf)
 	if fh.Length > fr.maxReadSize {
 		if fh == invalidHTTP1LookingFrameHeader() {
