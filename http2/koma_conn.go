@@ -91,6 +91,7 @@ func (k *KomaConn) Write(b []byte) (int, error) {
 	var err error
 
 	// TODO: change to sendmsgN in the future to prevent n always being 0.
+	fmt.Printf("should not arrive here! KomaConn.Write()!!!\n")
 	writeErr := k.rawConn.Write(func(fd uintptr) bool {
 		err = unix.Sendmsg(int(fd), b, nil, k.from, 0)
 		if err == unix.EAGAIN {

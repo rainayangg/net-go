@@ -239,6 +239,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("Koma socket finishes reading %d bytes!\n", n)
 
 	// Parse the whole stream into a slice consisting of frames
 	buf := fr.rbuf[:n]
@@ -247,7 +248,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		if len(buf) < 9 {
 			return nil, fmt.Errorf("http2: truncated frame header")
 		}
-
+		fmt.Printf("Koma socket reading a new frame! Leftover bytes is %d\n", len(buf))
 		// read header
 		fh := readFrameHeaderDgram(buf)
 		if fh.Length > fr.maxReadSize {
@@ -258,6 +259,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		}
 
 		frameLen := 9 + int(fh.Length)
+		fmt.Printf("Koma socket expects to read a frame of length %d from stream %d\n", frameLen, fh.StreamID)
 		if len(buf) < frameLen {
 			return nil, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
 		}
