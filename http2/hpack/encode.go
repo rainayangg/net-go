@@ -10,7 +10,7 @@ import (
 
 const (
 	uint32Max              = ^uint32(0)
-	initialHeaderTableSize = 4096
+	initialHeaderTableSize = 0
 )
 
 type Encoder struct {
