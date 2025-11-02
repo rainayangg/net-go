@@ -278,7 +278,8 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		}
 
 		// a full frame in the buffer, parse it
-		f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, buf[9:frameLen])
+		// TODO (Rui): optimize memory usage here later if it becomes a bottleneck, since we do not use the fc.frameCache here.
+		f, err := typeFrameParser(fh.Type)(nil, fh, fr.countError, buf[9:frameLen])
 		if err != nil {
 			if ce, ok := err.(connError); ok {
 				return nil, fr.connError(ce.Code, ce.Reason)

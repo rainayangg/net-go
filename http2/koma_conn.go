@@ -13,8 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/binary"
 	"golang.org/x/sys/unix"
 )
+
+const SO_MARK = 36
 
 type KomaConn struct {
 	fd      int
@@ -22,6 +25,8 @@ type KomaConn struct {
 	rawConn syscall.RawConn
 	from    unix.Sockaddr
 	m       *sync.Map
+	mark    uint32 // for keeping track of skb->mark
+	oobBuf  []byte // persistent control message buffer
 }
 
 type KomaAddr struct {
@@ -57,6 +62,7 @@ func NewKomaConn(fd int, m *sync.Map) (*KomaConn, error) {
 		file:    file,
 		rawConn: rawConn,
 		m:       m,
+		oobBuf:  make([]byte, 64), // allocate a persistent buffer for control messages
 	}, nil
 }
 
@@ -69,13 +75,17 @@ func (k *KomaConn) GetMap() *sync.Map {
 }
 
 func (k *KomaConn) Read(b []byte) (int, error) {
-	var n int
+	var n, oobn int
 	var err error
 	readErr := k.rawConn.Read(func(fd uintptr) bool {
-		n, _, _, k.from, err = unix.Recvmsg(int(fd), b, nil, 0)
+		n, oobn, _, k.from, err = unix.Recvmsg(int(fd), b, k.oobBuf, 0)
+		// fmt.Printf("KomaConn.Read: %s\n", k.from)
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK { // --> I think returning false is necesary.
 			// If we dont get data, we say the poller to again wait until the fd is available. This matches grpc expected behavior
 			return false
+		}
+		if err == nil && oobn > 0 {
+			k.parseMarkFromCmsgs(k.oobBuf[:oobn])
 		}
 		return true
 	})
@@ -84,6 +94,20 @@ func (k *KomaConn) Read(b []byte) (int, error) {
 	}
 
 	return n, err
+}
+
+func (k *KomaConn) parseMarkFromCmsgs(oob []byte) {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return
+	}
+	for _, msg := range msgs {
+		if msg.Header.Level == unix.SOL_SOCKET && msg.Header.Type == SO_MARK {
+			if len(msg.Data) >= 4 {
+				k.mark = uint32(binary.LittleEndian.Uint32(msg.Data[:4]))
+			}
+		}
+	}
 }
 
 func (k *KomaConn) Write(b []byte) (int, error) {
