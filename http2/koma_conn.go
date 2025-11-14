@@ -50,6 +50,13 @@ func (a *KomaAddr) String() string {
 	}
 }
 
+func (f *KomaFramer) GetMark() uint32 {
+	if kc, ok := f.KomaSocket.(*KomaConn); ok {
+		return kc.mark
+	}
+	return 0
+}
+
 func NewKomaConn(fd int, m *sync.Map) (*KomaConn, error) {
 	file := os.NewFile(uintptr(fd), "koma-socket")
 	rawConn, err := file.SyscallConn()
@@ -115,15 +122,16 @@ func (k *KomaConn) Write(b []byte) (int, error) {
 	var err error
 
 	// TODO: change to sendmsgN in the future to prevent n always being 0.
-	fmt.Printf("should not arrive here! KomaConn.Write()!!!\n")
+	// fmt.Printf("start KomaConn.Write()\n")
 	writeErr := k.rawConn.Write(func(fd uintptr) bool {
-		err = unix.Sendmsg(int(fd), b, nil, k.from, 0)
+		n, err = unix.SendmsgN(int(fd), b, nil, k.from, 0)
+		// fmt.Printf("KomaConn.Write: to %s, sendmsgN returns %d %d\n", k.from, n, err)
 		if err == unix.EAGAIN {
 			return false
 		}
 		return true
 	})
-
+	// fmt.Printf("koma.rawConn.Write() returned %d\n", writeErr)
 	if writeErr != nil {
 		return 0, writeErr
 	}

@@ -119,9 +119,27 @@ func (fr *KomaFramer) maxHeaderListSize() uint32 {
 	return fr.MaxHeaderListSize
 }
 
-func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) {
+// FlushBatch flushes all buffered frames to the underlying socket.
+// If nothing is buffered, it is a no-op.
+func (f *KomaFramer) FlushBatch() error {
+	if len(f.wbuf) == 0 {
+		return nil
+	}
+	if f.logWrites {
+		f.logWrite()
+	}
+	n, err := f.KomaSocket.Write(f.wbuf)
+	if err == nil && n != len(f.wbuf) {
+		err = io.ErrShortWrite
+	}
+	f.wbuf = f.wbuf[:0]
+	return err
+}
+
+func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) int {
 	// Write the FrameHeader.
-	f.wbuf = append(f.wbuf[:0],
+	plen := len(f.wbuf)
+	f.wbuf = append(f.wbuf,
 		0, // 3 bytes of length, filled in in endWrite
 		0,
 		0,
@@ -131,28 +149,24 @@ func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) {
 		byte(streamID>>16),
 		byte(streamID>>8),
 		byte(streamID))
+	return plen
 } // --> we can keep this mechanism as it is very datagram like
 
-func (f *KomaFramer) endWrite() error {
+func (f *KomaFramer) endWrite(prevLen int) error {
 	// Now that we know the final size, fill in the FrameHeader in
 	// the space previously reserved for it. Abuse append.
-	length := len(f.wbuf) - frameHeaderLen
+	length := len(f.wbuf) - (prevLen + frameHeaderLen)
 	if length >= (1 << 24) {
 		return ErrFrameTooLarge
 	}
-	_ = append(f.wbuf[:0],
+	_ = append(f.wbuf[:prevLen],
 		byte(length>>16),
 		byte(length>>8),
 		byte(length))
 	if f.logWrites {
 		f.logWrite()
 	}
-
-	n, err := f.KomaSocket.Write(f.wbuf)
-	if err == nil && n != len(f.wbuf) {
-		err = io.ErrShortWrite
-	}
-	return err
+	return nil
 } // --> we can keep this mechanism as it is very datagram like, only difference here is we send the whole thing over komaSocket
 
 func (f *KomaFramer) logWrite() {
@@ -431,27 +445,28 @@ func (f *KomaFramer) WriteData(streamID uint32, endStream bool, data []byte) err
 // It is the caller's responsibility not to violate the maximum frame size
 // and to not call other Write methods concurrently.
 func (f *KomaFramer) WriteDataPadded(streamID uint32, endStream bool, data, pad []byte) error {
-	if err := f.startWriteDataPadded(streamID, endStream, data, pad); err != nil {
+	pLen, err := f.startWriteDataPadded(streamID, endStream, data, pad)
+	if err != nil {
 		return err
 	}
-	return f.endWrite()
+	return f.endWrite(pLen)
 }
 
 // startWriteDataPadded is WriteDataPadded, but only writes the frame to the Framer's internal buffer.
 // The caller should call endWrite to flush the frame to the underlying writer.
-func (f *KomaFramer) startWriteDataPadded(streamID uint32, endStream bool, data, pad []byte) error {
+func (f *KomaFramer) startWriteDataPadded(streamID uint32, endStream bool, data, pad []byte) (int, error) {
 	if !validStreamID(streamID) && !f.AllowIllegalWrites {
-		return errStreamID
+		return 0, errStreamID
 	}
 	if len(pad) > 0 {
 		if len(pad) > 255 {
-			return errPadLength
+			return 0, errPadLength
 		}
 		if !f.AllowIllegalWrites {
 			for _, b := range pad {
 				if b != 0 {
 					// "Padding octets MUST be set to zero when sending."
-					return errPadBytes
+					return 0, errPadBytes
 				}
 			}
 		}
@@ -463,13 +478,13 @@ func (f *KomaFramer) startWriteDataPadded(streamID uint32, endStream bool, data,
 	if pad != nil {
 		flags |= FlagDataPadded
 	}
-	f.startWrite(FrameData, flags, streamID)
+	pLen := f.startWrite(FrameData, flags, streamID)
 	if pad != nil {
 		f.wbuf = append(f.wbuf, byte(len(pad)))
 	}
 	f.wbuf = append(f.wbuf, data...)
 	f.wbuf = append(f.wbuf, pad...)
-	return nil
+	return pLen, nil
 }
 
 // WriteSettings writes a SETTINGS frame with zero or more settings
@@ -478,12 +493,13 @@ func (f *KomaFramer) startWriteDataPadded(streamID uint32, endStream bool, data,
 // It will perform exactly one Write to the underlying Writer.
 // It is the caller's responsibility to not call other Write methods concurrently.
 func (f *KomaFramer) WriteSettings(settings ...Setting) error {
-	f.startWrite(FrameSettings, 0, 0)
+	pLen := f.startWrite(FrameSettings, 0, 0)
 	for _, s := range settings {
 		f.writeUint16(uint16(s.ID))
 		f.writeUint32(s.Val)
 	}
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteSettingsAck writes an empty SETTINGS frame with the ACK bit set.
@@ -491,8 +507,9 @@ func (f *KomaFramer) WriteSettings(settings ...Setting) error {
 // It will perform exactly one Write to the underlying Writer.
 // It is the caller's responsibility to not call other Write methods concurrently.
 func (f *KomaFramer) WriteSettingsAck() error {
-	f.startWrite(FrameSettings, FlagSettingsAck, 0)
-	return f.endWrite()
+	pLen := f.startWrite(FrameSettings, FlagSettingsAck, 0)
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 func (f *KomaFramer) WritePing(ack bool, data [8]byte) error {
@@ -500,17 +517,19 @@ func (f *KomaFramer) WritePing(ack bool, data [8]byte) error {
 	if ack {
 		flags = FlagPingAck
 	}
-	f.startWrite(FramePing, flags, 0)
+	pLen := f.startWrite(FramePing, flags, 0)
 	f.writeBytes(data[:])
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 func (f *KomaFramer) WriteGoAway(maxStreamID uint32, code ErrCode, debugData []byte) error {
-	f.startWrite(FrameGoAway, 0, 0)
+	pLen := f.startWrite(FrameGoAway, 0, 0)
 	f.writeUint32(maxStreamID & (1<<31 - 1))
 	f.writeUint32(uint32(code))
 	f.writeBytes(debugData)
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteWindowUpdate writes a WINDOW_UPDATE frame.
@@ -522,9 +541,10 @@ func (f *KomaFramer) WriteWindowUpdate(streamID, incr uint32) error {
 	if (incr < 1 || incr > 2147483647) && !f.AllowIllegalWrites {
 		return errors.New("illegal window increment value")
 	}
-	f.startWrite(FrameWindowUpdate, 0, streamID)
+	pLen := f.startWrite(FrameWindowUpdate, 0, streamID)
 	f.writeUint32(incr)
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteHeaders writes a single HEADERS frame.
@@ -552,7 +572,7 @@ func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	if !p.Priority.IsZero() {
 		flags |= FlagHeadersPriority
 	}
-	f.startWrite(FrameHeaders, flags, p.StreamID)
+	pLen := f.startWrite(FrameHeaders, flags, p.StreamID)
 	if p.PadLength != 0 {
 		f.writeByte(p.PadLength)
 	}
@@ -569,7 +589,11 @@ func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	}
 	f.wbuf = append(f.wbuf, p.BlockFragment...)
 	f.wbuf = append(f.wbuf, padZeros[:p.PadLength]...)
-	return f.endWrite()
+	err := f.endWrite(pLen)
+	if p.EndStream {
+		return f.FlushBatch()
+	}
+	return err
 }
 
 // WritePriority writes a PRIORITY frame.
@@ -583,14 +607,15 @@ func (f *KomaFramer) WritePriority(streamID uint32, p PriorityParam) error {
 	if !validStreamIDOrZero(p.StreamDep) {
 		return errDepStreamID
 	}
-	f.startWrite(FramePriority, 0, streamID)
+	pLen := f.startWrite(FramePriority, 0, streamID)
 	v := p.StreamDep
 	if p.Exclusive {
 		v |= 1 << 31
 	}
 	f.writeUint32(v)
 	f.writeByte(p.Weight)
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteRSTStream writes a RST_STREAM frame.
@@ -601,9 +626,10 @@ func (f *KomaFramer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	if !validStreamID(streamID) && !f.AllowIllegalWrites {
 		return errStreamID
 	}
-	f.startWrite(FrameRSTStream, 0, streamID)
+	pLen := f.startWrite(FrameRSTStream, 0, streamID)
 	f.writeUint32(uint32(code))
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteContinuation writes a CONTINUATION frame.
@@ -618,9 +644,9 @@ func (f *KomaFramer) WriteContinuation(streamID uint32, endHeaders bool, headerB
 	if endHeaders {
 		flags |= FlagContinuationEndHeaders
 	}
-	f.startWrite(FrameContinuation, flags, streamID)
+	pLen := f.startWrite(FrameContinuation, flags, streamID)
 	f.wbuf = append(f.wbuf, headerBlockFragment...)
-	return f.endWrite()
+	return f.endWrite(pLen)
 }
 
 // WritePushPromise writes a single PushPromise Frame.
@@ -641,7 +667,8 @@ func (f *KomaFramer) WritePushPromise(p PushPromiseParam) error {
 	if p.EndHeaders {
 		flags |= FlagPushPromiseEndHeaders
 	}
-	f.startWrite(FramePushPromise, flags, p.StreamID)
+
+	pLen := f.startWrite(FramePushPromise, flags, p.StreamID)
 	if p.PadLength != 0 {
 		f.writeByte(p.PadLength)
 	}
@@ -651,15 +678,17 @@ func (f *KomaFramer) WritePushPromise(p PushPromiseParam) error {
 	f.writeUint32(p.PromiseID)
 	f.wbuf = append(f.wbuf, p.BlockFragment...)
 	f.wbuf = append(f.wbuf, padZeros[:p.PadLength]...)
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 // WriteRawFrame writes a raw frame. This can be used to write
 // extension frames unknown to this package.
 func (f *KomaFramer) WriteRawFrame(t FrameType, flags Flags, streamID uint32, payload []byte) error {
-	f.startWrite(t, flags, streamID)
+	pLen := f.startWrite(t, flags, streamID)
 	f.writeBytes(payload)
-	return f.endWrite()
+	f.endWrite(pLen)
+	return f.FlushBatch()
 }
 
 func (fr *KomaFramer) maxHeaderStringLen() int {
