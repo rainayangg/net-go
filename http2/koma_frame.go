@@ -125,9 +125,6 @@ func (f *KomaFramer) FlushBatch() error {
 	if len(f.wbuf) == 0 {
 		return nil
 	}
-	if f.logWrites {
-		f.logWrite()
-	}
 	n, err := f.KomaSocket.Write(f.wbuf)
 	if err == nil && n != len(f.wbuf) {
 		err = io.ErrShortWrite
