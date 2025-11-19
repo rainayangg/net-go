@@ -89,7 +89,7 @@ func (k *KomaConn) Read(b []byte) (int, error) {
 		// fmt.Printf("KomaConn.Read: %s\n", k.from)
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK { // --> I think returning false is necesary.
 			// If we dont get data, we say the poller to again wait until the fd is available. This matches grpc expected behavior
-			fmt.Printf("KomaConn.Read: EAGAIN returned\n")
+			// fmt.Printf("KomaConn.Read: EAGAIN returned\n")
 			return false
 		}
 		if err == nil && oobn > 0 {
