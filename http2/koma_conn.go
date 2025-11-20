@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
 	"syscall"
 	"time"
 
@@ -24,7 +23,6 @@ type KomaConn struct {
 	file    *os.File
 	rawConn syscall.RawConn
 	from    unix.Sockaddr
-	m       *sync.Map
 	mark    uint32 // for keeping track of skb->mark
 	oobBuf  []byte // persistent control message buffer
 }
@@ -57,7 +55,7 @@ func (f *KomaFramer) GetMark() uint32 {
 	return 0
 }
 
-func NewKomaConn(fd int, m *sync.Map) (*KomaConn, error) {
+func NewKomaConn(fd int) (*KomaConn, error) {
 	file := os.NewFile(uintptr(fd), "koma-socket")
 	rawConn, err := file.SyscallConn()
 	if err != nil || rawConn == nil {
@@ -68,17 +66,12 @@ func NewKomaConn(fd int, m *sync.Map) (*KomaConn, error) {
 		fd:      fd,
 		file:    file,
 		rawConn: rawConn,
-		m:       m,
 		oobBuf:  make([]byte, 64), // allocate a persistent buffer for control messages
 	}, nil
 }
 
 func (k *KomaConn) GetFd() int {
 	return k.fd
-}
-
-func (k *KomaConn) GetMap() *sync.Map {
-	return k.m
 }
 
 func (k *KomaConn) Read(b []byte) (int, error) {
@@ -125,7 +118,7 @@ func (k *KomaConn) Write(b []byte) (int, error) {
 	// TODO: change to sendmsgN in the future to prevent n always being 0.
 	// fmt.Printf("start KomaConn.Write()\n")
 	writeErr := k.rawConn.Write(func(fd uintptr) bool {
-		n, err = unix.SendmsgN(int(fd), b, nil, k.from, 0)
+		n, err = unix.SendmsgN(int(fd), b, k.oobBuf, k.from, 0)
 		// fmt.Printf("KomaConn.Write: to %s, sendmsgN returns %d %d\n", k.from, n, err)
 		if err == unix.EAGAIN {
 			fmt.Printf("KomaConn.Write: EAGAIN returned\n")
