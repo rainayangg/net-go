@@ -7,13 +7,11 @@ import "C"
 
 import (
 	"fmt"
+	"golang.org/x/sys/unix"
 	"net"
 	"os"
 	"syscall"
 	"time"
-
-	"encoding/binary"
-	"golang.org/x/sys/unix"
 )
 
 const SO_MARK = 36
@@ -22,9 +20,9 @@ type KomaConn struct {
 	fd      int
 	file    *os.File
 	rawConn syscall.RawConn
-	from    unix.Sockaddr
-	mark    uint32 // for keeping track of skb->mark
-	oobBuf  []byte // persistent control message buffer
+	// from    unix.Sockaddr
+	mark uint32 // for keeping track of skb->mark
+	// oobBuf  []byte // persistent control message buffer
 }
 
 type KomaAddr struct {
@@ -48,12 +46,12 @@ func (a *KomaAddr) String() string {
 	}
 }
 
-func (f *KomaFramer) GetMark() uint32 {
-	if kc, ok := f.KomaSocket.(*KomaConn); ok {
-		return kc.mark
-	}
-	return 0
-}
+// func (f *KomaFramer) GetMark() uint32 {
+// 	if kc, ok := f.KomaSocket.(*KomaConn); ok {
+// 		return kc.mark
+// 	}
+// 	return 0
+// }
 
 func NewKomaConn(fd int) (*KomaConn, error) {
 	file := os.NewFile(uintptr(fd), "koma-socket")
@@ -66,7 +64,8 @@ func NewKomaConn(fd int) (*KomaConn, error) {
 		fd:      fd,
 		file:    file,
 		rawConn: rawConn,
-		oobBuf:  make([]byte, 64), // allocate a persistent buffer for control messages
+		mark:    0,
+		// oobBuf:  make([]byte, 64), // allocate a persistent buffer for control messages
 	}, nil
 }
 
@@ -75,62 +74,12 @@ func (k *KomaConn) GetFd() int {
 }
 
 func (k *KomaConn) Read(b []byte) (int, error) {
-	var n, oobn int
-	var err error
-	readErr := k.rawConn.Read(func(fd uintptr) bool {
-		n, oobn, _, k.from, err = unix.Recvmsg(int(fd), b, k.oobBuf, 0)
-		// fmt.Printf("KomaConn.Read: %s\n", k.from)
-		if err == unix.EAGAIN || err == unix.EWOULDBLOCK { // --> I think returning false is necesary.
-			// If we dont get data, we say the poller to again wait until the fd is available. This matches grpc expected behavior
-			// fmt.Printf("KomaConn.Read: EAGAIN returned\n")
-			return false
-		}
-		if err == nil && oobn > 0 {
-			k.parseMarkFromCmsgs(k.oobBuf[:oobn])
-		}
-		return true
-	})
-	if readErr != nil {
-		return 0, readErr
-	}
-
+	n, _, _, _, err := unix.Recvmsg(k.fd, b, nil, 0)
 	return n, err
 }
 
-func (k *KomaConn) parseMarkFromCmsgs(oob []byte) {
-	msgs, err := unix.ParseSocketControlMessage(oob)
-	if err != nil {
-		return
-	}
-	for _, msg := range msgs {
-		if msg.Header.Level == unix.SOL_SOCKET && msg.Header.Type == SO_MARK {
-			if len(msg.Data) >= 4 {
-				k.mark = uint32(binary.LittleEndian.Uint32(msg.Data[:4]))
-			}
-		}
-	}
-}
-
 func (k *KomaConn) Write(b []byte) (int, error) {
-	var n int
-	var err error
-
-	// TODO: change to sendmsgN in the future to prevent n always being 0.
-	// fmt.Printf("start KomaConn.Write()\n")
-	writeErr := k.rawConn.Write(func(fd uintptr) bool {
-		n, err = unix.SendmsgN(int(fd), b, k.oobBuf, k.from, 0)
-		// fmt.Printf("KomaConn.Write: to %s, sendmsgN returns %d %d\n", k.from, n, err)
-		if err == unix.EAGAIN {
-			fmt.Printf("KomaConn.Write: EAGAIN returned\n")
-			return false
-		}
-		return true
-	})
-	// fmt.Printf("koma.rawConn.Write() returned %d\n", writeErr)
-	if writeErr != nil {
-		return 0, writeErr
-	}
-
+	n, err := unix.SendmsgN(k.fd, b, nil, nil, 0)
 	return n, err
 }
 
@@ -158,10 +107,11 @@ func (k *KomaConn) LocalAddr() net.Addr {
 // The Addr returned is shared by all invocations of RemoteAddr, so
 // do not modify it.
 func (k *KomaConn) RemoteAddr() net.Addr {
-	if !k.ok() {
-		return nil
-	}
-	return &KomaAddr{from: k.from}
+	return nil
+	// if !k.ok() {
+	// 	return nil
+	// }
+	// return &KomaAddr{from: k.from}
 }
 
 // SetDeadline is a stub. Not implemented yet.

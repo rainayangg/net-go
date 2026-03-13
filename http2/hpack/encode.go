@@ -216,16 +216,16 @@ func appendVarInt(dst []byte, n byte, i uint64) []byte {
 // s will be encoded in Huffman codes only when it produces strictly
 // shorter byte string.
 func appendHpackString(dst []byte, s string) []byte {
-	// huffmanLength := HuffmanEncodeLength(s)
-	// if huffmanLength < uint64(len(s)) {
-	// 	first := len(dst)
-	// 	dst = appendVarInt(dst, 7, huffmanLength)
-	// 	dst = AppendHuffmanString(dst, s)
-	// 	dst[first] |= 0x80
-	// } else {
-	dst = appendVarInt(dst, 7, uint64(len(s)))
-	dst = append(dst, s...)
-	// }
+	huffmanLength := HuffmanEncodeLength(s)
+	if huffmanLength < uint64(len(s)) {
+		first := len(dst)
+		dst = appendVarInt(dst, 7, huffmanLength)
+		dst = AppendHuffmanString(dst, s)
+		dst[first] |= 0x80
+	} else {
+		dst = appendVarInt(dst, 7, uint64(len(s)))
+		dst = append(dst, s...)
+	}
 	return dst
 }
 
