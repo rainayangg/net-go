@@ -42,9 +42,11 @@ func (s *SliceBuf) read(buf []byte) (int, SliceBuf)  { panic("not needed") }
 
 // A Framer reads and writes Frames.
 type KomaFramer struct {
-	KomaSocket net.Conn
-	lastFrame  Frame
-	errDetail  error
+	KomaSocket      net.Conn
+	lastFrame       Frame
+	errDetail       error
+	lastReplyCookie KomaReplyCookie
+	replyCookie     KomaReplyCookie
 
 	// countError is a non-nil func that's called on a frame parse
 	// error with some unique error path token. It's initialized
@@ -124,17 +126,37 @@ func (fr *KomaFramer) maxHeaderListSize() uint32 {
 }
 
 // FlushBatch flushes all buffered frames to the underlying socket.
+// If a reply cookie is set, it is attached to this batch and then cleared.
 // If nothing is buffered, it is a no-op.
 func (f *KomaFramer) FlushBatch() error {
 	if len(f.wbuf) == 0 {
 		return nil
 	}
-	n, err := f.KomaSocket.Write(f.wbuf)
+	var (
+		n   int
+		err error
+	)
+	if kc, ok := f.KomaSocket.(*KomaConn); ok {
+		n, err = kc.WriteWithReplyCookie(f.wbuf, f.replyCookie.Handle, f.replyCookie.Flags)
+	} else {
+		n, err = f.KomaSocket.Write(f.wbuf)
+	}
 	if err == nil && n != len(f.wbuf) {
 		err = io.ErrShortWrite
 	}
 	f.wbuf = f.wbuf[:0]
+	f.replyCookie = KomaReplyCookie{}
 	return err
+}
+
+// SetReplyCookie marks the next flushed Koma batch with reply-routing metadata.
+func (fr *KomaFramer) SetReplyCookie(cookie KomaReplyCookie) {
+	fr.replyCookie = cookie
+}
+
+// LastReplyCookie returns the cookie received with the most recent ReadFrames call.
+func (fr *KomaFramer) LastReplyCookie() KomaReplyCookie {
+	return fr.lastReplyCookie
 }
 
 func komaFrameHeaderDebug(buf []byte, offset int) string {
@@ -299,19 +321,31 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
+	fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames start f=%p rbuf_cap=%d", fr, cap(fr.rbuf))
 
 	// Reads the whole stream
 	n, err := fr.KomaSocket.Read(fr.rbuf)
 	if err != nil {
+		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_error f=%p err=%v", fr, err)
 		return nil, err
+	}
+	if kc, ok := fr.KomaSocket.(*KomaConn); ok {
+		fr.lastReplyCookie = kc.LastReplyCookie()
+		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_done f=%p n=%d reply_handle=%d reply_flags=0x%x recvmsg_flags=0x%x", fr, n, fr.lastReplyCookie.Handle, fr.lastReplyCookie.Flags, kc.LastRecvmsgFlags())
+	} else {
+		fr.lastReplyCookie = KomaReplyCookie{}
+		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_done f=%p n=%d reply_handle=0 reply_flags=0x0", fr, n)
 	}
 	// fmt.Printf("Koma socket finishes receiving %d bytes!\n", n)
 
 	// Parse the whole stream into a slice consisting of frames
 	buf := fr.rbuf[:n]
 	var frames []Frame
+	streamIDs := make(map[uint32]struct{})
+	frameKinds := make([]string, 0, 4)
 	for len(buf) > 0 {
 		if len(buf) < 9 {
+			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames truncated_header f=%p remaining=%d", fr, len(buf))
 			return nil, fmt.Errorf("http2: truncated frame header")
 		}
 		// fmt.Printf("Koma socket reading a new frame! Leftover bytes is %d\n", len(buf))
@@ -325,8 +359,10 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		}
 
 		frameLen := 9 + int(fh.Length)
+		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames frame_header f=%p stream_id=%d type=%v flags=%d payload_len=%d frame_len=%d remaining=%d", fr, fh.StreamID, fh.Type, fh.Flags, fh.Length, frameLen, len(buf))
 		// fmt.Printf("Koma socket expects to read a frame of length %d from stream %d\n", frameLen, fh.StreamID)
 		if len(buf) < frameLen {
+			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames truncated_payload f=%p stream_id=%d want=%d got=%d", fr, fh.StreamID, frameLen, len(buf))
 			return nil, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
 		}
 
@@ -350,15 +386,33 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
 			meta, err := fr.readMetaFrame(f.(*HeadersFrame))
 			if err != nil {
+				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_meta_error f=%p stream_id=%d err=%v", fr, fh.StreamID, err)
 				return nil, err
 			}
 			frames = append(frames, meta)
+			streamIDs[meta.Header().StreamID] = struct{}{}
+			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", meta, meta.Header().StreamID))
+			if mh, ok := meta.(*MetaHeadersFrame); ok {
+				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_meta f=%p stream_id=%d fields=%d total_frames=%d", fr, meta.Header().StreamID, len(mh.Fields), len(frames))
+			} else {
+				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_meta f=%p stream_id=%d total_frames=%d", fr, meta.Header().StreamID, len(frames))
+			}
 		} else {
 			frames = append(frames, f)
+			streamIDs[f.Header().StreamID] = struct{}{}
+			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", f, f.Header().StreamID))
+			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_frame f=%p stream_id=%d type=%T total_frames=%d", fr, f.Header().StreamID, f, len(frames))
 		}
 
 		buf = buf[frameLen:]
 	}
+	if kc, ok := fr.KomaSocket.(*KomaConn); ok {
+		recvmsgFlags := kc.LastRecvmsgFlags()
+		if recvmsgFlags != 0 || len(streamIDs) > 1 {
+			fr.debugReadLoggerf("http2-koma: batch_summary bytes=%d recvmsg_flags=0x%x reply_handle=%d reply_flags=0x%x unique_stream_ids=%d frames=%s", kc.LastRecvmsgSize(), recvmsgFlags, fr.lastReplyCookie.Handle, fr.lastReplyCookie.Flags, len(streamIDs), strings.Join(frameKinds, ","))
+		}
+	}
+	fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames done f=%p total_frames=%d unique_stream_ids=%d frames=%s", fr, len(frames), len(streamIDs), strings.Join(frameKinds, ","))
 	return frames, nil
 }
 
