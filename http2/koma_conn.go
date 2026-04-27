@@ -108,17 +108,14 @@ func (k *KomaConn) SetRequireReplyCookie(enabled bool) error {
 
 // Read receives one Koma message and caches any reply cookie from ancillary data.
 func (k *KomaConn) Read(b []byte) (int, error) {
-	log.Printf("DELETEME: (rx) KomaConn.Read start fd=%d buf_len=%d", k.fd, len(b))
 	oob := make([]byte, unix.CmsgSpace(komaReplyCookieSize))
 	n, oobn, recvmsgFlags, _, err := unix.Recvmsg(k.fd, b, oob, 0)
 	k.lastRecvmsgFlags.Store(uint32(recvmsgFlags))
 	k.lastRecvmsgSize.Store(uint32(n))
-	log.Printf("DELETEME: (rx) KomaConn.Read recvmsg_done fd=%d n=%d oobn=%d flags=0x%x err=%v", k.fd, n, oobn, recvmsgFlags, err)
 	if err == nil {
 		cookie := parseKomaReplyCookie(oob[:oobn])
 		k.lastReplyHandle.Store(cookie.Handle)
 		k.lastReplyFlags.Store(cookie.Flags)
-		log.Printf("DELETEME: (rx) KomaConn.Read parsed_cookie fd=%d handle=%d flags=0x%x", k.fd, cookie.Handle, cookie.Flags)
 		if recvmsgFlags != 0 {
 			log.Printf("http2-koma: recvmsg abnormal fd=%d bytes=%d buf_len=%d flags=0x%x reply_handle=%d reply_flags=0x%x", k.fd, n, len(b), recvmsgFlags, cookie.Handle, cookie.Flags)
 		}
@@ -216,10 +213,8 @@ func (k *KomaConn) SyscallConn() (syscall.RawConn, error) {
 
 // parseKomaReplyCookie extracts a Koma reply cookie from socket control data.
 func parseKomaReplyCookie(oob []byte) KomaReplyCookie {
-	log.Printf("DELETEME: (rx) parseKomaReplyCookie start oob_len=%d", len(oob))
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
-		log.Printf("DELETEME: (rx) parseKomaReplyCookie parse_error oob_len=%d err=%v", len(oob), err)
 		return KomaReplyCookie{}
 	}
 	for _, msg := range msgs {
@@ -227,23 +222,19 @@ func parseKomaReplyCookie(oob []byte) KomaReplyCookie {
 			continue
 		}
 		if len(msg.Data) < komaReplyCookieSize {
-			log.Printf("DELETEME: (rx) parseKomaReplyCookie short_data level=%d type=%d data_len=%d", msg.Header.Level, msg.Header.Type, len(msg.Data))
 			continue
 		}
 		cookie := KomaReplyCookie{
 			Handle: binary.NativeEndian.Uint64(msg.Data[:8]),
 			Flags:  binary.NativeEndian.Uint32(msg.Data[8:12]),
 		}
-		log.Printf("DELETEME: (rx) parseKomaReplyCookie found handle=%d flags=0x%x data_len=%d", cookie.Handle, cookie.Flags, len(msg.Data))
 		return cookie
 	}
-	log.Printf("DELETEME: (rx) parseKomaReplyCookie no_cookie oob_len=%d", len(oob))
 	return KomaReplyCookie{}
 }
 
 // makeKomaReplyCookieOOB encodes a Koma reply cookie as socket control data (OOB: out-of-band).
 func makeKomaReplyCookieOOB(cookie KomaReplyCookie) []byte {
-	log.Printf("DELETEME: (tx) makeKomaReplyCookieOOB start handle=%d flags=0x%x", cookie.Handle, cookie.Flags)
 	oob := make([]byte, unix.CmsgSpace(komaReplyCookieSize))
 	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
 	hdr.Level = SOL_KOMA
@@ -254,6 +245,5 @@ func makeKomaReplyCookieOOB(cookie KomaReplyCookie) []byte {
 	binary.NativeEndian.PutUint64(oob[dataStart:dataStart+8], cookie.Handle)
 	binary.NativeEndian.PutUint32(oob[dataStart+8:dataStart+12], cookie.Flags)
 	binary.NativeEndian.PutUint32(oob[dataStart+12:dataStart+16], 0)
-	log.Printf("DELETEME: (tx) makeKomaReplyCookieOOB done handle=%d flags=0x%x oob_len=%d data_start=%d", cookie.Handle, cookie.Flags, len(oob), dataStart)
 	return oob
 }

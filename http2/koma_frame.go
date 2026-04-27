@@ -159,18 +159,6 @@ func (fr *KomaFramer) LastReplyCookie() KomaReplyCookie {
 	return fr.lastReplyCookie
 }
 
-func komaFrameHeaderDebug(buf []byte, offset int) string {
-	if offset < 0 || len(buf) < offset+frameHeaderLen {
-		return fmt.Sprintf("offset=%d insufficient_buffer_len=%d", offset, len(buf))
-	}
-	header := buf[offset : offset+frameHeaderLen]
-	length := uint32(header[0])<<16 | uint32(header[1])<<8 | uint32(header[2])
-	frameType := FrameType(header[3])
-	flags := Flags(header[4])
-	streamID := binary.BigEndian.Uint32(header[5:9]) & (1<<31 - 1)
-	return fmt.Sprintf("offset=%d len=%d type=%v flags=%d stream_id=%d", offset, length, frameType, flags, streamID)
-}
-
 func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) int {
 	// Write the FrameHeader.
 	plen := len(f.wbuf)
@@ -178,11 +166,6 @@ func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) i
 	f.currentWriteType = ftype
 	f.currentWriteFlags = flags
 	f.currentWriteID = streamID
-	debugBufLen := 0
-	if f.debugFramerBuf != nil {
-		debugBufLen = f.debugFramerBuf.Len()
-	}
-	f.debugWriteLoggerf("DELETEME: KomaFramer.startWrite start f=%p prev_len=%d type=%v flags=%d stream_id=%d wbuf_len=%d debug_buf_len=%d", f, plen, ftype, flags, streamID, len(f.wbuf), debugBufLen)
 	f.wbuf = append(f.wbuf,
 		0, // 3 bytes of length, filled in in endWrite
 		0,
@@ -193,7 +176,6 @@ func (f *KomaFramer) startWrite(ftype FrameType, flags Flags, streamID uint32) i
 		byte(streamID>>16),
 		byte(streamID>>8),
 		byte(streamID))
-	f.debugWriteLoggerf("DELETEME: KomaFramer.startWrite after_append f=%p %s", f, komaFrameHeaderDebug(f.wbuf, plen))
 	return plen
 } // --> we can keep this mechanism as it is very datagram like
 
@@ -201,29 +183,20 @@ func (f *KomaFramer) endWrite(prevLen int) error {
 	// Now that we know the final size, fill in the FrameHeader in
 	// the space previously reserved for it. Abuse append.
 	length := len(f.wbuf) - (prevLen + frameHeaderLen)
-	f.debugWriteLoggerf("DELETEME: KomaFramer.endWrite start f=%p prev_len=%d current_start=%d current_type=%v current_flags=%d current_stream_id=%d wbuf_len=%d raw_header_before=%s", f, prevLen, f.currentWriteStart, f.currentWriteType, f.currentWriteFlags, f.currentWriteID, len(f.wbuf), komaFrameHeaderDebug(f.wbuf, prevLen))
 	if length >= (1 << 24) {
-		f.debugWriteLoggerf("DELETEME: KomaFramer.endWrite frame_too_large f=%p prev_len=%d length=%d", f, prevLen, length)
 		return ErrFrameTooLarge
 	}
 	_ = append(f.wbuf[:prevLen],
 		byte(length>>16),
 		byte(length>>8),
 		byte(length))
-	f.debugWriteLoggerf("DELETEME: KomaFramer.endWrite after_length_patch f=%p computed_length=%d raw_header_after=%s", f, length, komaFrameHeaderDebug(f.wbuf, prevLen))
 	if f.logWrites {
-		f.debugWriteLoggerf("DELETEME: KomaFramer.endWrite calling_logWrite f=%p current_frame=%s", f, komaFrameHeaderDebug(f.wbuf, f.currentWriteStart))
 		f.logWrite()
 	}
 	return nil
 } // --> we can keep this mechanism as it is very datagram like, only difference here is we send the whole thing over komaSocket
 
 func (f *KomaFramer) logWrite() {
-	debugBufBefore := 0
-	if f.debugFramerBuf != nil {
-		debugBufBefore = f.debugFramerBuf.Len()
-	}
-	f.debugWriteLoggerf("DELETEME: KomaFramer.logWrite start f=%p current_start=%d current_type=%v current_flags=%d current_stream_id=%d wbuf_len=%d current_frame=%s debug_buf_len_before=%d", f, f.currentWriteStart, f.currentWriteType, f.currentWriteFlags, f.currentWriteID, len(f.wbuf), komaFrameHeaderDebug(f.wbuf, f.currentWriteStart), debugBufBefore)
 	if f.debugFramer == nil {
 		f.debugFramerBuf = new(bytes.Buffer)
 		f.debugFramer = NewFramer(nil, f.debugFramerBuf)
@@ -236,15 +209,11 @@ func (f *KomaFramer) logWrite() {
 	// f.debugFramerBuf.Write(f.wbuf) BUG FIX ?
 	f.debugFramerBuf.Reset()
 	f.debugFramerBuf.Write(f.wbuf[f.currentWriteStart:])
-
-	f.debugWriteLoggerf("DELETEME: KomaFramer.logWrite after_buffer_append f=%p debug_buf_len_after_append=%d", f, f.debugFramerBuf.Len())
 	fr, err := f.debugFramer.ReadFrame()
 	if err != nil {
-		f.debugWriteLoggerf("DELETEME: KomaFramer.logWrite read_frame_error f=%p err=%v debug_buf_len_after_read=%d", f, err, f.debugFramerBuf.Len())
 		f.debugWriteLoggerf("http2: Framer %p: failed to decode just-written frame", f)
 		return
 	}
-	f.debugWriteLoggerf("DELETEME: KomaFramer.logWrite decoded_frame f=%p decoded_type=%v decoded_stream_id=%d decoded_header=%+v debug_buf_len_after_read=%d", f, fr.Header().Type, fr.Header().StreamID, fr.Header(), f.debugFramerBuf.Len())
 	f.debugWriteLoggerf("http2: Framer %p: wrote %v", f, summarizeFrame(fr))
 }
 
@@ -321,20 +290,16 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
-	fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames start f=%p rbuf_cap=%d", fr, cap(fr.rbuf))
 
 	// Reads the whole stream
 	n, err := fr.KomaSocket.Read(fr.rbuf)
 	if err != nil {
-		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_error f=%p err=%v", fr, err)
 		return nil, err
 	}
 	if kc, ok := fr.KomaSocket.(*KomaConn); ok {
 		fr.lastReplyCookie = kc.LastReplyCookie()
-		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_done f=%p n=%d reply_handle=%d reply_flags=0x%x recvmsg_flags=0x%x", fr, n, fr.lastReplyCookie.Handle, fr.lastReplyCookie.Flags, kc.LastRecvmsgFlags())
 	} else {
 		fr.lastReplyCookie = KomaReplyCookie{}
-		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_done f=%p n=%d reply_handle=0 reply_flags=0x0", fr, n)
 	}
 	// fmt.Printf("Koma socket finishes receiving %d bytes!\n", n)
 
@@ -345,7 +310,6 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	frameKinds := make([]string, 0, 4)
 	for len(buf) > 0 {
 		if len(buf) < 9 {
-			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames truncated_header f=%p remaining=%d", fr, len(buf))
 			return nil, fmt.Errorf("http2: truncated frame header")
 		}
 		// fmt.Printf("Koma socket reading a new frame! Leftover bytes is %d\n", len(buf))
@@ -359,10 +323,8 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		}
 
 		frameLen := 9 + int(fh.Length)
-		fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames frame_header f=%p stream_id=%d type=%v flags=%d payload_len=%d frame_len=%d remaining=%d", fr, fh.StreamID, fh.Type, fh.Flags, fh.Length, frameLen, len(buf))
 		// fmt.Printf("Koma socket expects to read a frame of length %d from stream %d\n", frameLen, fh.StreamID)
 		if len(buf) < frameLen {
-			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames truncated_payload f=%p stream_id=%d want=%d got=%d", fr, fh.StreamID, frameLen, len(buf))
 			return nil, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
 		}
 
@@ -386,22 +348,15 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
 			meta, err := fr.readMetaFrame(f.(*HeadersFrame))
 			if err != nil {
-				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames read_meta_error f=%p stream_id=%d err=%v", fr, fh.StreamID, err)
 				return nil, err
 			}
 			frames = append(frames, meta)
 			streamIDs[meta.Header().StreamID] = struct{}{}
 			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", meta, meta.Header().StreamID))
-			if mh, ok := meta.(*MetaHeadersFrame); ok {
-				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_meta f=%p stream_id=%d fields=%d total_frames=%d", fr, meta.Header().StreamID, len(mh.Fields), len(frames))
-			} else {
-				fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_meta f=%p stream_id=%d total_frames=%d", fr, meta.Header().StreamID, len(frames))
-			}
 		} else {
 			frames = append(frames, f)
 			streamIDs[f.Header().StreamID] = struct{}{}
 			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", f, f.Header().StreamID))
-			fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames appended_frame f=%p stream_id=%d type=%T total_frames=%d", fr, f.Header().StreamID, f, len(frames))
 		}
 
 		buf = buf[frameLen:]
@@ -412,7 +367,6 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 			fr.debugReadLoggerf("http2-koma: batch_summary bytes=%d recvmsg_flags=0x%x reply_handle=%d reply_flags=0x%x unique_stream_ids=%d frames=%s", kc.LastRecvmsgSize(), recvmsgFlags, fr.lastReplyCookie.Handle, fr.lastReplyCookie.Flags, len(streamIDs), strings.Join(frameKinds, ","))
 		}
 	}
-	fr.debugWriteLoggerf("DELETEME: KomaFramer.ReadFrames done f=%p total_frames=%d unique_stream_ids=%d frames=%s", fr, len(frames), len(streamIDs), strings.Join(frameKinds, ","))
 	return frames, nil
 }
 
@@ -650,10 +604,8 @@ func (f *KomaFramer) WriteWindowUpdate(streamID, incr uint32) error {
 // It is the caller's responsibility to not call other Write methods concurrently.
 func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	if !validStreamID(p.StreamID) && !f.AllowIllegalWrites {
-		f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders invalid_stream_id stream_id=%d end_stream=%v end_headers=%v block_len=%d", p.StreamID, p.EndStream, p.EndHeaders, len(p.BlockFragment))
 		return errStreamID
 	}
-	f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders start stream_id=%d end_stream=%v end_headers=%v pad_length=%d priority=%v block_len=%d", p.StreamID, p.EndStream, p.EndHeaders, p.PadLength, !p.Priority.IsZero(), len(p.BlockFragment))
 	var flags Flags
 	if p.PadLength != 0 {
 		flags |= FlagHeadersPadded
@@ -674,7 +626,6 @@ func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	if !p.Priority.IsZero() {
 		v := p.Priority.StreamDep
 		if !validStreamIDOrZero(v) && !f.AllowIllegalWrites {
-			f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders invalid_priority_dep stream_id=%d dep_stream_id=%d", p.StreamID, v)
 			return errDepStreamID
 		}
 		if p.Priority.Exclusive {
@@ -685,12 +636,9 @@ func (f *KomaFramer) WriteHeaders(p HeadersFrameParam) error {
 	}
 	f.wbuf = append(f.wbuf, p.BlockFragment...)
 	f.wbuf = append(f.wbuf, padZeros[:p.PadLength]...)
-	f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders before_end_write stream_id=%d flags=%d payload_len=%d pLen=%d", p.StreamID, flags, len(f.wbuf)-9, pLen)
 	err := f.endWrite(pLen)
-	f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders after_end_write stream_id=%d err=%v", p.StreamID, err)
 	if p.EndStream {
 		flushErr := f.FlushBatch()
-		f.debugWriteLoggerf("DELETEME: KomaFramer.WriteHeaders flush_batch stream_id=%d err=%v", p.StreamID, flushErr)
 		return flushErr
 	}
 	return err
