@@ -20,8 +20,8 @@ type KomaConn struct {
 	fd      int
 	file    *os.File
 	rawConn syscall.RawConn
-	// from    unix.Sockaddr
-	mark uint32 // for keeping track of skb->mark
+	from    unix.Sockaddr
+	// mark uint32 // for keeping track of skb->mark
 	// oobBuf  []byte // persistent control message buffer
 }
 
@@ -64,7 +64,7 @@ func NewKomaConn(fd int) (*KomaConn, error) {
 		fd:      fd,
 		file:    file,
 		rawConn: rawConn,
-		mark:    0,
+		// mark:    0,
 		// oobBuf:  make([]byte, 64), // allocate a persistent buffer for control messages
 	}, nil
 }
@@ -74,12 +74,14 @@ func (k *KomaConn) GetFd() int {
 }
 
 func (k *KomaConn) Read(b []byte) (int, error) {
-	n, _, _, _, err := unix.Recvmsg(k.fd, b, nil, 0)
+	var n int
+	var err error
+	n, _, _, k.from, err = unix.Recvmsg(k.fd, b, nil, 0)
 	return n, err
 }
 
 func (k *KomaConn) Write(b []byte) (int, error) {
-	n, err := unix.SendmsgN(k.fd, b, nil, nil, 0)
+	n, err := unix.SendmsgN(k.fd, b, nil, k.from, 0)
 	return n, err
 }
 
