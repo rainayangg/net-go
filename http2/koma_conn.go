@@ -8,7 +8,6 @@ import "C"
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"sync/atomic"
@@ -116,9 +115,6 @@ func (k *KomaConn) Read(b []byte) (int, error) {
 		cookie := parseKomaReplyCookie(oob[:oobn])
 		k.lastReplyHandle.Store(cookie.Handle)
 		k.lastReplyFlags.Store(cookie.Flags)
-		if recvmsgFlags != 0 {
-			log.Printf("http2-koma: recvmsg abnormal fd=%d bytes=%d buf_len=%d flags=0x%x reply_handle=%d reply_flags=0x%x", k.fd, n, len(b), recvmsgFlags, cookie.Handle, cookie.Flags)
-		}
 	}
 	return n, err
 }

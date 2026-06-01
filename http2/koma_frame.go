@@ -306,8 +306,6 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	// Parse the whole stream into a slice consisting of frames
 	buf := fr.rbuf[:n]
 	var frames []Frame
-	streamIDs := make(map[uint32]struct{})
-	frameKinds := make([]string, 0, 4)
 	for len(buf) > 0 {
 		if len(buf) < 9 {
 			return nil, fmt.Errorf("http2: truncated frame header")
@@ -351,21 +349,11 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 				return nil, err
 			}
 			frames = append(frames, meta)
-			streamIDs[meta.Header().StreamID] = struct{}{}
-			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", meta, meta.Header().StreamID))
 		} else {
 			frames = append(frames, f)
-			streamIDs[f.Header().StreamID] = struct{}{}
-			frameKinds = append(frameKinds, fmt.Sprintf("%T:%d", f, f.Header().StreamID))
 		}
 
 		buf = buf[frameLen:]
-	}
-	if kc, ok := fr.KomaSocket.(*KomaConn); ok {
-		recvmsgFlags := kc.LastRecvmsgFlags()
-		if recvmsgFlags != 0 || len(streamIDs) > 1 {
-			fr.debugReadLoggerf("http2-koma: batch_summary bytes=%d recvmsg_flags=0x%x reply_handle=%d reply_flags=0x%x unique_stream_ids=%d frames=%s", kc.LastRecvmsgSize(), recvmsgFlags, fr.lastReplyCookie.Handle, fr.lastReplyCookie.Flags, len(streamIDs), strings.Join(frameKinds, ","))
-		}
 	}
 	return frames, nil
 }
