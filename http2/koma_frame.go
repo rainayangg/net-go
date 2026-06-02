@@ -265,7 +265,7 @@ func (fr *KomaFramer) ErrorDetail() error {
 //
 // If ReadFrame returns an error and a non-nil Frame, the Frame's StreamID
 // indicates the stream responsible for the error.
-func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the preface here, one must check the implementation
+func (fr *KomaFramer) ReadFrames() ([]Frame, unix.Sockaddr, error) { // --> we dont get the preface here, one must check the implementation
 	// https://github.com/grpc/grpc-go/blob/master/internal/transport/http2_server.go#L305C43-L305C45
 	fr.errDetail = nil
 	// TODO: should I do anything to the lastFrame? to understand it better
@@ -276,7 +276,17 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	// Reads the whole stream
 	n, err := fr.KomaSocket.Read(fr.rbuf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	kc, ok := fr.KomaSocket.(*KomaConn)
+	if !ok {
+		log.Printf("http2-koma: ReadFrames missing KOMA conn type %T", fr.KomaSocket)
+		return nil, nil, errMissingKomaReplyRoute
+	}
+	replyFrom := kc.From()
+	if replyFrom == nil {
+		log.Printf("http2-koma: ReadFrames missing reply route bytes=%d", n)
+		return nil, nil, errMissingKomaReplyRoute
 	}
 	// fmt.Printf("Koma socket finishes receiving %d bytes!\n", n)
 
@@ -285,22 +295,22 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 	var frames []Frame
 	for len(buf) > 0 {
 		if len(buf) < 9 {
-			return nil, fmt.Errorf("http2: truncated frame header")
+			return nil, replyFrom, fmt.Errorf("http2: truncated frame header")
 		}
 		// fmt.Printf("Koma socket reading a new frame! Leftover bytes is %d\n", len(buf))
 		// read header
 		fh := readFrameHeaderDgram(buf)
 		if fh.Length > fr.maxReadSize {
 			if fh == invalidHTTP1LookingFrameHeader() {
-				return nil, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", err)
+				return nil, replyFrom, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", err)
 			}
-			return nil, ErrFrameTooLarge
+			return nil, replyFrom, ErrFrameTooLarge
 		}
 
 		frameLen := 9 + int(fh.Length)
 		// fmt.Printf("Koma socket expects to read a frame of length %d from stream %d\n", frameLen, fh.StreamID)
 		if len(buf) < frameLen {
-			return nil, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
+			return nil, replyFrom, fmt.Errorf("http2: truncated frame payload, want %d got %d", frameLen, len(buf))
 		}
 
 		// a full frame in the buffer, parse it
@@ -308,12 +318,12 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		f, err := typeFrameParser(fh.Type)(nil, fh, fr.countError, buf[9:frameLen])
 		if err != nil {
 			if ce, ok := err.(connError); ok {
-				return nil, fr.connError(ce.Code, ce.Reason)
+				return nil, replyFrom, fr.connError(ce.Code, ce.Reason)
 			}
-			return nil, err
+			return nil, replyFrom, err
 		}
 		if err := fr.checkFrameOrder(f); err != nil {
-			return nil, err
+			return nil, replyFrom, err
 		}
 		if fr.logReads {
 			fr.debugReadLoggerf("http2: Framer %p: read %v", fr, summarizeFrame(f))
@@ -323,7 +333,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 		if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
 			meta, err := fr.readMetaFrame(f.(*HeadersFrame))
 			if err != nil {
-				return nil, err
+				return nil, replyFrom, err
 			}
 			frames = append(frames, meta)
 		} else {
@@ -332,7 +342,7 @@ func (fr *KomaFramer) ReadFrames() ([]Frame, error) { // --> we dont get the pre
 
 		buf = buf[frameLen:]
 	}
-	return frames, nil
+	return frames, replyFrom, nil
 }
 
 // ReadFrame reads a single frame. The returned Frame is only valid
