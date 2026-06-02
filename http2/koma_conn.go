@@ -6,6 +6,7 @@ package http2
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
 	"net"
@@ -15,6 +16,8 @@ import (
 )
 
 const SO_MARK = 36
+
+var errMissingKomaReplyRoute = errors.New("http2: missing KOMA reply route")
 
 type KomaConn struct {
 	fd      int
@@ -80,9 +83,19 @@ func (k *KomaConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
+func (k *KomaConn) From() unix.Sockaddr {
+	return k.from
+}
+
+func (k *KomaConn) WriteToFrom(b []byte, from unix.Sockaddr) (int, error) {
+	if from == nil {
+		return 0, errMissingKomaReplyRoute
+	}
+	return unix.SendmsgN(k.fd, b, nil, from, 0)
+}
+
 func (k *KomaConn) Write(b []byte) (int, error) {
-	n, err := unix.SendmsgN(k.fd, b, nil, k.from, 0)
-	return n, err
+	return 0, errMissingKomaReplyRoute
 }
 
 // functions required to implement net.conn interface

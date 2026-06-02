@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2/hpack"
+	"golang.org/x/sys/unix"
 )
 
 func readFrameHeaderDgram(b []byte) FrameHeader {
@@ -45,6 +46,7 @@ type KomaFramer struct {
 	KomaSocket net.Conn
 	lastFrame  Frame
 	errDetail  error
+	replyFrom  unix.Sockaddr
 
 	// countError is a non-nil func that's called on a frame parse
 	// error with some unique error path token. It's initialized
@@ -112,6 +114,14 @@ type KomaFramer struct {
 	frameCache *frameCache // nil if frames aren't reused (default)
 }
 
+type komaRouteConn interface {
+	WriteToFrom([]byte, unix.Sockaddr) (int, error)
+}
+
+func (fr *KomaFramer) SetReplyFrom(from unix.Sockaddr) {
+	fr.replyFrom = from
+}
+
 func (fr *KomaFramer) maxHeaderListSize() uint32 {
 	if fr.MaxHeaderListSize == 0 {
 		return 16 << 20 // sane default, per docs
@@ -125,11 +135,16 @@ func (f *KomaFramer) FlushBatch() error {
 	if len(f.wbuf) == 0 {
 		return nil
 	}
-	n, err := f.KomaSocket.Write(f.wbuf)
+	kc, ok := f.KomaSocket.(komaRouteConn)
+	if !ok {
+		return errMissingKomaReplyRoute
+	}
+	n, err := kc.WriteToFrom(f.wbuf, f.replyFrom)
 	if err == nil && n != len(f.wbuf) {
 		err = io.ErrShortWrite
 	}
 	f.wbuf = f.wbuf[:0]
+	f.replyFrom = nil
 	return err
 }
 
