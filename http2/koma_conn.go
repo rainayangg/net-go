@@ -76,11 +76,33 @@ func (k *KomaConn) GetFd() int {
 	return k.fd
 }
 
-func (k *KomaConn) Read(b []byte) (int, error) {
-	var n int
-	var err error
-	n, _, _, k.from, err = unix.Recvmsg(k.fd, b, nil, 0)
-	return n, err
+func (k *KomaConn) Read(b []byte) (n int, err error) {
+	var (
+		from    unix.Sockaddr
+		recvErr error
+	)
+
+	err = k.rawConn.Read(func(fd uintptr) bool {
+		for {
+			n, _, _, from, recvErr = unix.Recvmsg(int(fd), b, nil, unix.MSG_DONTWAIT)
+			if recvErr == unix.EINTR {
+				continue
+			}
+			if recvErr == unix.EAGAIN || recvErr == unix.EWOULDBLOCK {
+				return false
+			}
+			return true
+		}
+	})
+	if err != nil {
+		return 0, err
+	}
+	if recvErr != nil {
+		return 0, recvErr
+	}
+
+	k.from = from
+	return n, nil
 }
 
 func (k *KomaConn) From() unix.Sockaddr {
